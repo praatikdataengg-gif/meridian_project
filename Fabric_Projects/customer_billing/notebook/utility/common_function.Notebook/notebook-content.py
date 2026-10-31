@@ -282,3 +282,14 @@ def match_file_name_pattern(file_name_patern, file_name, date_time_format=None):
 # META   "language": "python",
 # META   "language_group": "synapse_pyspark"
 # META }
+
+# CELL ********************
+
+#Silver and Gold functions
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
