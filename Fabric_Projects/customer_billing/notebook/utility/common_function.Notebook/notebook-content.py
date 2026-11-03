@@ -207,21 +207,56 @@ def process_log(
 
 # CELL ********************
 
-#email notification
-def send_mail_fn (f_subject,b_message): 
-    sender_email = "amit.aigk@gmail.com"
-    to_email = "amit.aigk@gmail.com"
-    host="smtp.gmail.com"
-    port=587
-    server=smtplib.SMTP(host,port)
-    server.starttls()
-    server.login(sender_email,"phmo embc isbs gvlw")
-    m_text=b_message
-    test=MIMEText(m_text,"html","utf-8")
-    test["subject"]=f_subject
-    test["From"]=sender_email
-    test["to"]=to_email
-    server.send_message(test)
+# #email notification
+# def send_mail_fn (f_subject,b_message): 
+#     sender_email = "amit.aigk@gmail.com"
+#     to_email = "amit.aigk@gmail.com"
+#     host="smtp.gmail.com"
+#     port=587
+#     server=smtplib.SMTP(host,port)
+#     server.starttls()
+#     server.login(sender_email,"phmo embc isbs gvlw")
+#     m_text=b_message
+#     test=MIMEText(m_text,"html","utf-8")
+#     test["subject"]=f_subject
+#     test["From"]=sender_email
+#     test["to"]=to_email
+#     server.send_message(test)
+
+import smtplib, ssl, socket
+from email.mime.text import MIMEText
+
+def send_mail_fn(f_subject, b_message):
+    sender_email = "praatikdataengg@gmail.com"
+    to_email = "praatikdataengg@gmail.com"
+    app_password = "ysilffjzfhwegujy"   # 16 chars, no spaces
+    host = "smtp.gmail.com"
+
+    msg = MIMEText(b_message, "html", "utf-8")
+    msg["Subject"] = f_subject
+    msg["From"] = sender_email
+    msg["To"] = to_email
+
+    ctx = ssl.create_default_context()
+    try:
+        # Port 587 with STARTTLS
+        with smtplib.SMTP(host, 587, timeout=30) as server:
+            server.ehlo()
+            server.starttls(context=ctx)
+            server.ehlo()
+            server.login(sender_email, app_password)
+            server.send_message(msg)
+    except (smtplib.SMTPServerDisconnected, socket.timeout, OSError):
+        # Fallback: port 465 with SSL
+        with smtplib.SMTP_SSL(host, 465, context=ctx, timeout=30) as server:
+            server.login(sender_email, app_password)
+            server.send_message(msg)
+
+def safe_send_mail(f_subject, b_message):
+    try:
+        send_mail_fn(f_subject, b_message)
+    except Exception as e:
+        print(f"Email failed (non-fatal): {e}")
 
 # METADATA ********************
 
