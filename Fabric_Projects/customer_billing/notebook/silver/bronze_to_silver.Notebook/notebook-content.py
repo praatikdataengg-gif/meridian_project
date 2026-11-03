@@ -46,6 +46,18 @@ dummy_date = "9999-01-01"
 
 # CELL ********************
 
+run_user = mssparkutils.env.getUserName()
+print(run_user)
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
 # #Generate hash key
 # def generate_hash_key(dataFrame):
 #     hash_payload = F.to_json(

@@ -40,7 +40,7 @@ import json
 
 #decalring variable
 file_location = "/lakehouse/default/Files/config/dev.config.json"
-
+folder_name = datetime.now().strftime("%Y%m%d")
 
 # METADATA ********************
 
@@ -62,19 +62,21 @@ file_location = "/lakehouse/default/Files/config/dev.config.json"
 
 # CELL ********************
 
-# open json file
+#open json file
 with open(file_location) as f:
     config_data = json.load(f)
-# print(config_data) 
-# declaring variable 
+#declaring variables
 env = config_data["env"]
 input_folder = config_data["input_folder"]
 unzip_folder = config_data["unzip_folder"]
 excepted_files = config_data["excepted_files"]
-# print(env)
-# print(input_folder)
-# print(unzip_folder)
-# print(excepted_files)   
+bronze_yaml_path = config_data["bronze_yaml_path"]
+silver_yaml_path = config_data["silver_yaml_path"]
+gold_yaml_path = config_data["gold_yaml_path"]
+bronze_all_files = config_data["bronze_all_files"]
+silver_all_files = config_data["silver_all_files"]
+gold_all_files = config_data["gold_all_files"]
+dummy_date = config_data["dummy_date"]
 
 # METADATA ********************
 

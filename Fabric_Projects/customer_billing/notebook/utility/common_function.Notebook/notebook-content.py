@@ -34,11 +34,13 @@ import smtplib
 import time
 import yaml
 import re
+import traceback
 from pyspark.sql.functions import col
 from email.mime.text import MIMEText
 from datetime import datetime
 from pyspark.sql import functions as F
 from delta.tables import DeltaTable
+from functools import reduce
 
 # METADATA ********************
 
@@ -50,6 +52,19 @@ from delta.tables import DeltaTable
 # CELL ********************
 
 %run "./variable_assignment"
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+#UserName who run the pipeline
+run_by_user = mssparkutils.env.getUserName()
+print(run_by_user)
 
 # METADATA ********************
 
@@ -153,7 +168,6 @@ def process_log(
                     error_message string,
                     email_status string
                  """
-
     run_end_time = datetime.now()
     business_date = run_end_time.date()
     log_data = [(
@@ -172,22 +186,17 @@ def process_log(
                     error_message, 
                     email_status
                 )]             
-
     log_df = spark.createDataFrame(log_data, schema=log_schema)
     log_df.createOrReplaceTempView("temp_etl_run_log")
     spark.sql("""
         MERGE INTO control.etl_run_log AS t
         USING temp_etl_run_log AS s
-        ON t.run_id = s.run_id
-        WHEN MATCHED THEN UPDATE SET
-            t.run_end_time          = s.run_end_time,
-            t.run_status            = s.run_status,
-            t.total_inserted_count  = s.total_inserted_count,
-            t.total_updated_count   = s.total_updated_count,
-            t.error_message         = s.error_message,
-            t.email_status          = s.email_status
+        ON t.run_id=s.run_id
+        WHEN MATCHED THEN
+        UPDATE SET t.run_status = s.run_status,
+        t.total_inserted_count = s.total_inserted_count
         WHEN NOT MATCHED THEN INSERT *
-    """)
+        """)
 
 # METADATA ********************
 
@@ -285,7 +294,75 @@ def match_file_name_pattern(file_name_patern, file_name, date_time_format=None):
 
 # CELL ********************
 
-#Silver and Gold functions
+#Reusable functions from silver layer
+#Generate hash key
+def generate_hash_key(df, hash_columns, hash_name="hash_key"):
+    payload = F.to_json(
+        F.struct(*[F.col(c).cast("string").alias(c) for c in hash_columns]),
+        options={"ignoreNullFields": "false"}
+    )
+    return df.withColumn(hash_name, F.sha2(payload, 256))
+
+#Validate duplicates based on business key
+def validate_business_keys(df, business_keys, table_name):
+    for key in business_keys:
+        if df.filter(F.col(key).isNull()).limit(1).count():
+            raise ValueError(f"Null business key found in {table_name}: {key}")
+
+    if df.groupBy(*business_keys).count().filter(F.col("count") > 1).limit(1).count():
+        raise ValueError(f"Duplicate business keys found in {table_name}")
+
+#Get count after succesful
+def get_delta_merge_counts(table_name):
+    history = DeltaTable.forName(spark, table_name).history(1).first()
+
+    if history is None or history["operation"] != "MERGE":
+        raise ValueError(f"No MERGE operation found in Delta history for {table_name}")
+
+    metrics = history["operationMetrics"] or {}
+    inserted_count = int(metrics.get("numTargetRowsInserted", "0"))
+    updated_count = int(metrics.get("numTargetRowsUpdated", "0"))
+
+    return inserted_count, updated_count
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+# Function to log duplicate records
+def duplicate_log(duplicate_df, run_id, source_table, business_keys, data_columns):
+    duplicate_log_table = "control.duplicate_data_log"
+
+    # Check whether duplicate records exist
+    if duplicate_df.limit(1).count() == 0:
+        print(f"No duplicate records found in {source_table}")
+        return 0
+
+    # Prepare duplicate log data
+    duplicate_log_df = duplicate_df.select(
+        F.lit(run_id).alias("run_id"),
+        F.lit(source_table).alias("source_table"),
+        F.lit(",".join(business_keys)).alias("business_key"),
+        F.to_json(
+            F.struct(*[F.col(c) for c in business_keys])
+        ).alias("business_key_value"),
+        F.col("duplicate_count").cast("int"),
+        F.to_json(
+            F.struct(*[F.col(c) for c in data_columns])
+        ).alias("record_data"),
+        F.current_timestamp().alias("logged_at")
+    )
+
+    # Insert duplicate records into control table
+    duplicate_log_df.write.format("delta").mode("append").saveAsTable(duplicate_log_table)
+    duplicate_count = duplicate_df.count()
+    print(f"Duplicate records logged successfully: "f"{duplicate_count} | Table: {duplicate_log_table}")
+    return duplicate_count
 
 # METADATA ********************
 
