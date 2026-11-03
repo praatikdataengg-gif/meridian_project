@@ -47,16 +47,31 @@ run_by_user = "manual_user"
 
 # CELL ********************
 
-#Reading yaml files from gold
+# Reading yaml files from gold
 if "pipeline_name" not in globals():
     pipeline_name = "manual_run"
 if "task_name" not in globals():
     task_name = "nb_for_gold_layer"
+
+# NEW: optional list of tables to run, e.g. only_tables = ["products", "stores"]
+# Leave as None to run every YAML file.
+if "only_tables" not in globals():
+    only_tables = None
+
 all_files = mssparkutils.fs.ls(gold_all_files)
 if not all_files:
-    raise FileNotFoundError(f"No YAML files found in {gold_yaml_path}")
+    raise FileNotFoundError(f"No YAML files found in {gold_all_files}")  # CHANGED: same variable as the listing
+
+failed_tables = []  # NEW
+
 for yaml_file in all_files:
     table_name = yaml_file.name.rsplit(".", 1)[0]
+
+    # NEW: skip tables not requested (useful when rerunning only failed ones)
+    if only_tables and table_name not in only_tables:
+        print(f"Skipping {table_name} (not in only_tables)")
+        continue
+
     inserted_count = 0
     updated_count = 0
     run_id = mssparkutils.env.getJobId() + f"_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -75,7 +90,7 @@ for yaml_file in all_files:
         column_names = [c["name"] for c in columns]
         column_types = {c["name"]: c["data_type"].upper() for c in columns}
 
-        # ---- NEW: create schema and table from YAML if they don't exist ----
+        # Create schema and table from YAML if they don't exist
         spark.sql(f"CREATE SCHEMA IF NOT EXISTS {target_schema}")
         if not spark.catalog.tableExists(target_table):
             ddl_cols = ", ".join([
@@ -85,7 +100,6 @@ for yaml_file in all_files:
             ])
             spark.sql(f"CREATE TABLE {target_table} ({ddl_cols}) USING DELTA")
             print(f"Created {target_table}")
-        # ---- END NEW ----
 
         created_by_col = "created_by"
         updated_by_col = "updated_by"
@@ -111,22 +125,25 @@ for yaml_file in all_files:
 
         process_log("Start", table_name=table_name, layer="gold")
 
-        #Read current records from Silver
-        # Silver is SCD2. Only take rows marked as current.
-        silver = (spark.table(source_table).filter(F.col("is_latest") == 1).select(*data_columns))
+        # Read current records from Silver (Silver is SCD2, take only current rows)
+        silver = (
+            spark.table(source_table)
+            .filter(F.col("is_latest") == 1)
+            .select(*data_columns)
+        )
 
         # Cast Silver columns to the data types declared in Gold YAML.
         for c in data_columns:
             silver = silver.withColumn(c, F.col(c).cast(column_types[c]))
 
-        #To check null and duplicate business keys.
+        # Check null and duplicate business keys.
         validate_business_keys(silver, business_keys, source_table)
 
-        #To generate the source hash key.
+        # Generate the source hash key.
         silver = generate_hash_key(silver, hash_columns, hash_name)
         silver.createOrReplaceTempView(f"tmp_{table_name}_silver")
 
-        #Read existing Gold records and generate hash key
+        # Read existing Gold records and generate hash key
         gold = spark.table(target_table).select(*data_columns)
         validate_business_keys(gold, business_keys, target_table)
 
@@ -135,20 +152,25 @@ for yaml_file in all_files:
         gold.createOrReplaceTempView(f"tmp_{table_name}_gold")
 
         # Compare Silver and Gold using runtime hash keys.
-        # Both temporary views contain hash_key.
-        # Neither physical Delta table contains hash_key.
-
         merge_join_condition = " AND ".join([f"s.{key} = g.{key}" for key in business_keys])
 
         # Identify new and changed records using runtime hash comparison.
-        records_to_merge = spark.sql(f"""SELECT s.* FROM tmp_{table_name}_silver s LEFT JOIN tmp_{table_name}_gold g ON {merge_join_condition} WHERE g.{business_keys[0]} IS NULL    OR NOT (s.{hash_name} <=> g.{hash_name})""")
+        records_to_merge = spark.sql(f"""
+            SELECT s.*
+            FROM tmp_{table_name}_silver s
+            LEFT JOIN tmp_{table_name}_gold g ON {merge_join_condition}
+            WHERE g.{business_keys[0]} IS NULL
+               OR NOT (s.{hash_name} <=> g.{hash_name})
+        """)
 
-        # Remove runtime hash_key before preparing the MERGE source.
+        # Prepare the MERGE source.
+        # CHANGED: updated_date for NEW rows is the sentinel 9999-01-01.
+        # Changed rows get updated_date = now via update_values below.
         silver_for_merge = (
             records_to_merge
             .drop(hash_name)
             .withColumn(inserted_col, F.current_timestamp())
-            .withColumn(updated_col, F.current_timestamp())
+            .withColumn(updated_col, F.lit("9999-01-01 00:00:00").cast("timestamp"))
             .withColumn(created_by_col, F.lit(run_by_user))
             .withColumn(updated_by_col, F.lit(run_by_user))
             .select(*column_names)
@@ -162,20 +184,19 @@ for yaml_file in all_files:
             merge_condition = " AND ".join([f"t.{key} = s.{key}" for key in business_keys])
 
             # Update data columns, excluding business keys.
+            # inserted_date and created_by are NOT touched, so they are preserved.
             update_values = {c: f"s.{c}" for c in data_columns if c not in business_keys}
 
-            # Update audit columns.
+            # Update audit columns for changed rows.
             update_values[updated_col] = F.current_timestamp()
             update_values[updated_by_col] = F.lit(run_by_user)
 
             # Insert all configured Gold columns.
             insert_values = {c: f"s.{c}" for c in column_names}
+
             (
                 delta_table.alias("t")
-                .merge(
-                    silver_for_merge.alias("s"),
-                    merge_condition
-                )
+                .merge(silver_for_merge.alias("s"), merge_condition)
                 .whenMatchedUpdate(set=update_values)
                 .whenNotMatchedInsert(values=insert_values)
                 .execute()
@@ -183,22 +204,43 @@ for yaml_file in all_files:
 
             # Get inserted and updated counts from Delta history.
             inserted_count, updated_count = get_delta_merge_counts(target_table)
-        # If Silver is empty, MERGE is skipped and both counts remain zero.
-        process_log("Success", table_name=table_name, layer="gold", total_inserted_count=inserted_count, total_updated_count=updated_count)
-        print(f"Completed {target_table}: "f"inserted={inserted_count}, updated={updated_count}")
-        send_mail_fn( f"{pipeline_name}-{task_name}-{table_name}- Gold layer is processed successfully", f"Inserted: {inserted_count}, Updated: {updated_count}")
+
+        # If nothing is new or changed, MERGE is skipped and both counts remain zero.
+        process_log(
+            "Success", table_name=table_name, layer="gold",
+            total_inserted_count=inserted_count, total_updated_count=updated_count
+        )
+        print(f"Completed {target_table}: inserted={inserted_count}, updated={updated_count}")
+        send_mail_fn(
+            f"{pipeline_name}-{task_name}-{table_name}- Gold layer is processed successfully",
+            f"Inserted: {inserted_count}, Updated: {updated_count}"
+        )
+
     except Exception as e:
         error_text = traceback.format_exc()
         print(f"Failed {table_name}: {error_text}")
         try:
-            process_log("Failed", table_name=table_name, layer="gold", total_inserted_count=inserted_count, total_updated_count=updated_count, error_message=str(e))
+            process_log(
+                "Failed", table_name=table_name, layer="gold",
+                total_inserted_count=inserted_count, total_updated_count=updated_count,
+                error_message=str(e)
+            )
         except Exception as log_error:
             print(f"Could not write failure log: {log_error}")
         try:
-            send_mail_fn( f"{pipeline_name}-{task_name}-{table_name}- Gold layer is failed", error_text)
+            send_mail_fn(
+                f"{pipeline_name}-{task_name}-{table_name}- Gold layer is failed",
+                error_text
+            )
         except Exception as mail_error:
             print(f"Could not send failure email: {mail_error}")
-        raise
+
+        failed_tables.append(table_name)  # CHANGED: record the failure and keep going
+        continue                          # CHANGED: was "raise", which stopped all remaining tables
+
+# NEW: fail the notebook (and pipeline) at the end if any table failed
+if failed_tables:
+    raise Exception(f"Gold layer failed for tables: {failed_tables}")
 
 # METADATA ********************
 
@@ -209,7 +251,18 @@ for yaml_file in all_files:
 
 # CELL ********************
 
-print(pipeline_name)
+spark.catalog.refreshTable("gold.customers")
+
+display(
+    spark.table("gold.customers")
+    .select(
+        "customer_id",
+        "city",
+        "inserted_date",
+        "updated_date"
+    )
+    .orderBy("customer_id")
+)
 
 # METADATA ********************
 

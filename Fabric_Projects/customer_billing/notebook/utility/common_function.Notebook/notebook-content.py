@@ -229,7 +229,7 @@ from email.mime.text import MIMEText
 def send_mail_fn(f_subject, b_message):
     sender_email = "praatikdataengg@gmail.com"
     to_email = "praatikdataengg@gmail.com"
-    app_password = "ysilffjzfhwegujy"   # 16 chars, no spaces
+    app_password = "odbllgdxrayfvjpf"   # 16 chars, no spaces
     host = "smtp.gmail.com"
 
     msg = MIMEText(b_message, "html", "utf-8")
